@@ -1,0 +1,114 @@
+# report-triage-agent MVP 로컬 개발 스택.
+#
+# `docker compose up -d`로 아래 6개 서비스를 기동한다.
+#   - postgres       : 앱 DB + Temporal DB를 공유하는 단일 Postgres (DB 3개)
+#   - nats           : JetStream 활성화된 NATS
+#   - temporal       : Postgres 백엔드로 auto-setup되는 Temporal 서버
+#   - temporal-ui    : workflow 관측용 UI
+#   - api            : FastAPI / uvicorn
+#   - worker         : 동일 이미지, command만 다른 Temporal worker
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: triage
+      POSTGRES_PASSWORD: triage
+      POSTGRES_DB: triage
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backend/scripts/init-db.sh:/docker-entrypoint-initdb.d/10-init-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U triage -d triage"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    # -js: JetStream 활성화. -m 8222: 모니터링 HTTP 포트(디버깅용).
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    # healthcheck 없음: nats:alpine 이미지에 wget/curl/nc가 없다.
+    # 대신 앱의 connect 재시도가 기동 레이스를 흡수한다.
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: triage
+      POSTGRES_PWD: triage
+      POSTGRES_SEEDS: postgres
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      # 컨테이너 내부 헬스체크가 127.0.0.1로 접근할 수 있도록 0.0.0.0에 바인드.
+      BIND_ON_IP: 0.0.0.0
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address 127.0.0.1:7233 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  temporal-ui:
+    image: temporalio/ui:2.30.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+
+  api:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://triage:triage@postgres:5432/triage
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: report-triage
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: report-triage
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  worker:
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://triage:triage@postgres:5432/triage
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: report-triage
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: report-triage
+    command: ["python", "-m", "app.temporal.worker"]
+
+volumes:
+  postgres-data:

@@ -201,11 +201,3 @@ backend/
       streams.py
     main.py
 ```
-
-## 9. README에 남길 설계 의사결정
-
-- 왜 FastAPI를 선택했는가
-- 왜 background task 대신 Temporal workflow를 선택했는가
-- 왜 NATS JetStream을 붙였는가
-- 왜 분류 정확도보다 운영 흐름 구현에 집중했는가
-- 실패 시 어떤 상태를 남기도록 설계했는가
