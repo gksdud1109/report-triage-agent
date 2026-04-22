@@ -11,7 +11,7 @@
 
 - 신고 입력을 안정적으로 저장한다.
 - 신고 내용을 기반으로 `category`, `priority`, `requires_review`를 산출한다.
-- 운영 큐(`fraud`, `spam`, `abuse`, `general`)로 자동 배정한다.
+- 운영 큐(`fraud-review`, `spam-review`, `abuse-review`, `general-review`)로 자동 배정한다.
 - 처리 흐름을 재시도 가능한 비동기 workflow로 분리한다.
 - 분류 결과를 이벤트로 발행해 후속 운영 시스템이 구독할 수 있게 한다.
 

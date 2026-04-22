@@ -24,6 +24,7 @@
   - `classified`
   - `failed`
 - API 사용자는 현재 상태를 조회할 수 있어야 한다.
+- **status의 단일 진실 원본은 `reports.status` (DB)이다.** API는 Temporal workflow execution 상태를 직접 참조하지 않고 DB만 읽는다. Temporal 상태는 운영/관측 보조 용도로만 사용한다.
 
 ### FR-3 자동 분류
 
@@ -45,6 +46,12 @@
 
 - 시스템은 분류 결과를 바탕으로 큐 이름을 결정해야 한다.
 - queue item은 별도 테이블로 저장해야 한다.
+- MVP 카테고리 → 큐 매핑은 아래로 고정한다.
+  - `fraud` → `fraud-review`
+  - `spam` → `spam-review`
+  - `abuse` → `abuse-review`
+  - `policy` → `general-review` (전용 정책 검토 큐는 MVP 범위 밖이므로 일반 큐로 합류)
+  - `general` → `general-review`
 
 ### FR-7 결과 조회
 
@@ -58,8 +65,12 @@
 ### FR-8 재처리
 
 - `POST /reports/{report_id}/reprocess`로 재처리를 요청할 수 있어야 한다.
-- 기존 결과를 덮어쓸지 새 이력을 남길지는 MVP에서 단순화할 수 있다.
 - MVP에서는 "최신 결과 1개만 유지" 방식으로 단순화한다.
+- 구체 동작은 아래와 같다.
+  - `reports.status`를 `queued`로 되돌린다.
+  - 새로운 Temporal run을 시작한다. (workflow_id 전략은 `06-workflow-and-events.md` 참고)
+  - `report_classifications`와 `review_queue_items`는 `report_id` 기준 **upsert-overwrite**로 최신 결과만 남긴다.
+  - 분류·큐 라우팅 이력 테이블은 두지 않는다. 필요해지면 별도 테이블로 확장한다.
 
 ## 2. 비기능 요구사항
 

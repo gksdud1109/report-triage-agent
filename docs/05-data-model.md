@@ -131,6 +131,17 @@ MVP에서는 아래 3개 테이블만 사용한다.
 
 - 과도한 정규화보다 구현 속도를 우선한다.
 - metadata는 JSONB로 저장해 도메인 변경에 유연하게 대응한다.
-- enum은 DB enum 또는 문자열 제약 중 구현 편한 방식을 선택한다.
-- 재처리 시 기존 queue item을 update할지 새 row를 insert할지는 MVP에서 단순화한다.
-- MVP에서는 "최신 상태 1개 유지"가 가장 간단하다.
+- enum은 문자열 제약으로 둔다. 값 추가 유연성을 위해 DB enum 타입은 쓰지 않는다.
+
+### 7.1 upsert 정책 (MVP)
+
+- `report_classifications`, `review_queue_items`는 **`report_id` 기준 upsert-overwrite**로 최신 1건만 유지한다.
+- 재처리 시에도 새 row를 insert하지 않고 기존 row를 덮어쓴다.
+- 이력 테이블은 MVP 범위 밖이다. 필요해지면 `*_history` 테이블로 별도 확장한다.
+
+### 7.2 스키마 생성 전략 (MVP)
+
+- Alembic migration은 MVP 범위 밖이다.
+- 앱 기동 lifespan에서 `Base.metadata.create_all()`로 스키마를 생성한다.
+- Postgres 컨테이너의 `docker-entrypoint-initdb.d`가 DB를 먼저 만들어 두고, 테이블은 앱이 기동될 때 만드는 역할 분담이다.
+- 운영성이 필요해지는 시점에 초기 migration 1개를 추가하는 것으로 전환한다.

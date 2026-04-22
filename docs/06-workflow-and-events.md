@@ -2,9 +2,23 @@
 
 ## 1. Temporal workflow 책임
 
-workflow 이름 제안:
+workflow 이름:
 
 - `ReportTriageWorkflow`
+
+### workflow_id 전략
+
+- 최초 실행: `report-triage-{report_id}`
+- 재처리 실행: `report-triage-{report_id}-{epoch_ms}`
+  - 같은 `report_id`로 여러 run이 생길 수 있지만, MVP에서는 DB 쪽 결과가 upsert-overwrite되므로 충돌 없이 "최신 run이 덮어쓰는" 모델이 유지된다.
+  - 이전 run을 별도로 cancel하지 않는다. 이전 run이 먼저 완료되어 덮어쓰더라도 곧이어 최신 run이 다시 덮어쓴다.
+- workflow 입력: `report_id` 문자열 하나.
+
+### status 소유권
+
+- **`reports.status`가 단일 진실 원본이다.** Temporal workflow execution 상태와는 별개다.
+- activity가 상태 전이(`processing`, `classified`, `failed`)를 직접 DB에 기록한다.
+- API는 DB의 `reports.status`만 읽고 응답한다. Temporal을 describe해서 상태를 만들지 않는다.
 
 workflow는 아래 단계의 순서를 보장하고, 실패 시 재시도 정책을 적용한다.
 
@@ -47,13 +61,25 @@ workflow는 아래 단계의 순서를 보장하고, 실패 시 재시도 정책
 
 ### `persist_classification_activity`
 
-- classification 결과 upsert
+- classification 결과 upsert (report_id 기준 overwrite, 최신 1건만 유지)
 
 ### `route_queue_activity`
 
 - queue 이름 결정
-- `review_queue_items` upsert
+- `review_queue_items` upsert (report_id 기준 overwrite)
 - 결과 queue 이름 반환
+
+카테고리 → 큐 매핑은 다음과 같이 고정한다.
+
+| category | queue_name |
+|---|---|
+| `fraud` | `fraud-review` |
+| `spam` | `spam-review` |
+| `abuse` | `abuse-review` |
+| `policy` | `general-review` |
+| `general` | `general-review` |
+
+`policy`는 전용 큐를 두지 않고 `general-review`로 합류한다. 향후 정책 검토 데스크가 생기면 `policy-review`를 추가한다.
 
 ### `publish_triage_events_activity`
 
