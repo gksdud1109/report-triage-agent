@@ -57,40 +57,17 @@ curl http://localhost:8000/health
 # {"status":"ok"}
 ```
 
-### 2. 샘플 3건 — 서로 다른 큐로 라우팅 확인
+### 2. 샘플 3건 — 서로 다른 큐로 라우팅 확인 (한 번에)
 
 ```bash
-# fraud → fraud-review
-curl -sS -X POST http://localhost:8000/reports \
-  -H 'content-type: application/json' \
-  -d '{
-    "reporter_id": "user_123", "target_type": "listing", "target_id": "listing_456",
-    "reason_code": "fraud_suspected",
-    "description": "선입금을 유도하고 외부 메신저로 이동하자고 했습니다.",
-    "source_channel": "marketplace",
-    "metadata": {"price": 300000}
-  }'
-
-# spam → spam-review
-curl -sS -X POST http://localhost:8000/reports \
-  -H 'content-type: application/json' \
-  -d '{
-    "reporter_id": "user_222", "target_type": "post", "target_id": "post_999",
-    "reason_code": "spam",
-    "description": "광고 도배 반복 게시물입니다.",
-    "source_channel": "community", "metadata": {}
-  }'
-
-# abuse → abuse-review
-curl -sS -X POST http://localhost:8000/reports \
-  -H 'content-type: application/json' \
-  -d '{
-    "reporter_id": "user_333", "target_type": "chat_message", "target_id": "msg_777",
-    "reason_code": "abusive_language",
-    "description": "심한 욕설과 협박을 했습니다.",
-    "source_channel": "chat", "metadata": {}
-  }'
+./scripts/demo.sh
+# health → samples/{fraud,spam,abuse}.json POST → 분류 결과 → 큐별 라우팅 → 카운터
+# 환경변수: API(기본 localhost:8000), WAIT(분류 대기 초, 기본 2)
 ```
+
+스크립트가 도는 6단계는 §1·§3·§4·§8을 한 번에 묶은 것이다. 각 단계를 손으로
+하나씩 보고 싶으면 아래 §3~§8을 그대로 따라가면 된다. 페이로드는
+[`samples/{fraud,spam,abuse}.json`](./samples)에 있다.
 
 ### 3. 분류 결과 조회
 
@@ -192,6 +169,8 @@ backend/
   Dockerfile
   scripts/init-db.sh  # postgres 초기화 시 temporal DB 생성
 frontend/        # Next.js 14 App Router 데모 화면 (page.tsx 한 장)
+samples/         # POST /reports 페이로드 3건 (fraud/spam/abuse)
+scripts/demo.sh  # 1~6단계 한 번에 도는 스모크 데모
 docker-compose.yml
 docs/            # 기획·요구사항·API·데이터모델·워크플로우 문서
 ```

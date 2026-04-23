@@ -1,0 +1,9 @@
+{
+  "reporter_id": "user_123",
+  "target_type": "listing",
+  "target_id": "listing_456",
+  "reason_code": "fraud_suspected",
+  "description": "선입금을 유도하고 외부 메신저로 이동하자고 했습니다.",
+  "source_channel": "marketplace",
+  "metadata": {"price": 300000}
+}

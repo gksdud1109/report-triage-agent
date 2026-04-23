@@ -1,0 +1,9 @@
+{
+  "reporter_id": "user_333",
+  "target_type": "chat_message",
+  "target_id": "msg_777",
+  "reason_code": "abusive_language",
+  "description": "심한 욕설과 협박을 했습니다.",
+  "source_channel": "chat",
+  "metadata": {}
+}

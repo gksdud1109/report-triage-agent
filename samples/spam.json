@@ -1,0 +1,9 @@
+{
+  "reporter_id": "user_222",
+  "target_type": "post",
+  "target_id": "post_999",
+  "reason_code": "spam",
+  "description": "광고 도배 반복 게시물입니다.",
+  "source_channel": "community",
+  "metadata": {}
+}
