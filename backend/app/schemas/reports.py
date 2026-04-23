@@ -3,12 +3,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+# 상태 enum은 schemas가 아니라 db.enums에 단일 정의. 여기서 import만 해
+# 외부에 같은 이름으로 노출한다 — 기존 import 경로(`from app.schemas.reports
+# import ReportStatus`)도 깨지지 않도록.
+from app.db.enums import ReportStatus  # noqa: F401 (re-export)
+
 TargetType = Literal["listing", "user", "chat_message", "post", "comment", "transaction"]
 ReasonCode = Literal[
     "spam", "fraud_suspected", "abusive_language", "policy_violation", "scam_link", "other"
 ]
 SourceChannel = Literal["marketplace", "community", "chat", "profile"]
-ReportStatus = Literal["queued", "processing", "classified", "failed"]
 
 
 class ReportPayload(BaseModel):

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from app.db.enums import ReportStatus
 from app.db.session import session_scope
 from app.messaging import events as nats_events
 from app.schemas.events import QueueRoutedEvent, TriagedEvent
@@ -39,7 +40,7 @@ async def load_report_activity(report_id: str) -> dict:
 @activity.defn
 async def mark_report_processing_activity(report_id: str) -> None:
     async with session_scope() as session:
-        await reports_repo.update_report_status(session, report_id, "processing")
+        await reports_repo.update_report_status(session, report_id, ReportStatus.PROCESSING)
 
 
 @activity.defn
@@ -135,13 +136,13 @@ async def publish_triage_events_activity(
 @activity.defn
 async def mark_report_classified_activity(report_id: str) -> None:
     async with session_scope() as session:
-        await reports_repo.update_report_status(session, report_id, "classified")
+        await reports_repo.update_report_status(session, report_id, ReportStatus.CLASSIFIED)
 
 
 @activity.defn
 async def mark_report_failed_activity(report_id: str) -> None:
     async with session_scope() as session:
-        await reports_repo.update_report_status(session, report_id, "failed")
+        await reports_repo.update_report_status(session, report_id, ReportStatus.FAILED)
 
 
 ALL_ACTIVITIES = [

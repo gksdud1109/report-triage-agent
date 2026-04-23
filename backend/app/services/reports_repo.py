@@ -5,11 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.ids import new_classification_id, new_queue_item_id
+from app.db.enums import ReportStatus
 from app.db.models import Report, ReportClassification, ReviewQueueItem
 from app.schemas.reports import ReportCreateRequest
 
 
-async def create_report(session: AsyncSession, report_id: str, payload: ReportCreateRequest) -> Report:
+async def create_report(
+    session: AsyncSession,
+    report_id: str,
+    payload: ReportCreateRequest,
+    *,
+    idempotency_key: str | None = None,
+) -> Report:
     report = Report(
         id=report_id,
         reporter_id=payload.reporter_id,
@@ -19,11 +26,26 @@ async def create_report(session: AsyncSession, report_id: str, payload: ReportCr
         description=payload.description,
         source_channel=payload.source_channel,
         report_metadata=payload.metadata or {},
-        status="queued",
+        idempotency_key=idempotency_key,
+        status=ReportStatus.QUEUED,
     )
     session.add(report)
     await session.flush()
     return report
+
+
+async def find_report_by_idempotency_key(
+    session: AsyncSession, idempotency_key: str
+) -> Report | None:
+    """동일 Idempotency-Key로 이미 생성된 신고를 조회한다.
+
+    클라이언트 retry 시 두 번째 요청이 새 row를 만드는 대신 기존 report_id를
+    그대로 돌려주기 위해 사용. unique 제약으로 두 동시 요청이 같은 키를 만들면
+    한 쪽이 IntegrityError로 실패하므로, 라우터에서는 lookup-then-insert 후
+    예외를 잡아서 다시 lookup하는 패턴으로 race를 흡수한다.
+    """
+    stmt = select(Report).where(Report.idempotency_key == idempotency_key)
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_report(session: AsyncSession, report_id: str) -> Report | None:
@@ -35,19 +57,30 @@ async def get_report(session: AsyncSession, report_id: str) -> Report | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def update_report_status(session: AsyncSession, report_id: str, status: str) -> None:
+async def update_report_status(
+    session: AsyncSession, report_id: str, status: ReportStatus | str
+) -> None:
     report = await session.get(Report, report_id)
     if report is None:
         raise LookupError(f"report not found: {report_id}")
-    report.status = status
+    # StrEnum/str 어느 쪽이든 SQLAlchemy String 컬럼에 그대로 들어간다.
+    report.status = str(status)
     report.updated_at = datetime.now(timezone.utc)
 
 
 async def reset_report_for_reprocess(session: AsyncSession, report_id: str) -> Report:
+    """재처리를 위해 status만 queued로 되돌린다.
+
+    classification/queue_item row는 일부러 지우지 않는다 — 새 워크플로 run의
+    `persist_classification_activity`/`route_queue_activity`가 upsert로 덮어쓴다.
+    그 사이 짧은 윈도우 동안 GET /reports는 "이전 분류 결과 + status=queued"를
+    동시에 보여주는데, 이는 의도된 동작이다 (API가 절대 NULL classification을
+    반환하지 않게 하기 위함).
+    """
     report = await session.get(Report, report_id)
     if report is None:
         raise LookupError(f"report not found: {report_id}")
-    report.status = "queued"
+    report.status = ReportStatus.QUEUED
     report.updated_at = datetime.now(timezone.utc)
     return report
 

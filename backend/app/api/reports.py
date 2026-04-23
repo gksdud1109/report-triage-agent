@@ -8,7 +8,8 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
@@ -16,6 +17,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from app.api.deps import get_session, get_temporal_client
 from app.core.config import get_settings
 from app.core.ids import new_report_id
+from app.db.enums import ReportStatus
 from app.db.models import Report
 from app.schemas.reports import (
     ClassificationPayload,
@@ -68,17 +70,52 @@ async def create_report(
     payload: ReportCreateRequest,
     session: AsyncSession = Depends(get_session),
     temporal: Client = Depends(get_temporal_client),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ReportCreateResponse:
     """신고 1건을 저장하고 ReportTriageWorkflow를 시작한다.
 
     저장 성공/workflow 시작은 분리해서 다룬다. workflow 시작이 실패하면
     DB는 유지하고 503으로 응답해 사용자가 재처리 API로 다시 시도할 수 있다.
+
+    Idempotency-Key:
+        클라이언트가 네트워크 오류 등으로 같은 신고를 두 번 POST할 때 두 번째
+        요청이 새 row를 만들지 않고 기존 report_id를 그대로 돌려준다. 헤더가
+        없으면 기존 동작 유지(매 요청 새 row). 동시 요청 race는 unique 제약
+        위반(IntegrityError)을 catch해서 다시 lookup하는 패턴으로 흡수한다.
     """
     settings = get_settings()
+
+    # Idempotency 1차 lookup: 이미 같은 키로 만들어진 게 있으면 그대로 응답.
+    if idempotency_key is not None:
+        existing = await reports_repo.find_report_by_idempotency_key(
+            session, idempotency_key
+        )
+        if existing is not None:
+            return ReportCreateResponse(
+                report_id=existing.id, status=existing.status
+            )
+
     report_id = new_report_id()
 
-    await reports_repo.create_report(session, report_id, payload)
-    await session.commit()
+    try:
+        await reports_repo.create_report(
+            session, report_id, payload, idempotency_key=idempotency_key
+        )
+        await session.commit()
+    except IntegrityError:
+        # 동시 요청이 같은 idempotency_key로 먼저 insert한 경우.
+        # 1차 lookup 이후 ~ commit 사이의 race를 흡수: 한 번 더 lookup해서
+        # 우승한 쪽 결과를 그대로 돌려준다.
+        await session.rollback()
+        if idempotency_key is None:
+            raise  # idempotency_key와 무관한 충돌은 그대로 전파
+        existing = await reports_repo.find_report_by_idempotency_key(
+            session, idempotency_key
+        )
+        if existing is None:
+            # 매우 드문 경계 — IntegrityError가 다른 unique 충돌이었던 경우.
+            raise
+        return ReportCreateResponse(report_id=existing.id, status=existing.status)
 
     try:
         await temporal.start_workflow(
@@ -97,7 +134,7 @@ async def create_report(
         logger.exception("failed to start triage workflow for %s", report_id)
         try:
             await reports_repo.update_report_status(
-                session, report_id, "workflow_start_failed"
+                session, report_id, ReportStatus.WORKFLOW_START_FAILED
             )
             await session.commit()
         except Exception:
@@ -106,7 +143,7 @@ async def create_report(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "report_id": report_id,
-                "status": "workflow_start_failed",
+                "status": ReportStatus.WORKFLOW_START_FAILED.value,
                 "error": "workflow start failed",
                 "message": (
                     "report saved but triage workflow could not be started; "
@@ -116,7 +153,7 @@ async def create_report(
             },
         ) from err
 
-    return ReportCreateResponse(report_id=report_id, status="queued")
+    return ReportCreateResponse(report_id=report_id, status=ReportStatus.QUEUED)
 
 
 @router.get("/{report_id}", response_model=ReportDetailResponse)
@@ -177,7 +214,7 @@ async def reprocess_report(
         logger.exception("failed to start reprocess workflow for %s", report_id)
         try:
             await reports_repo.update_report_status(
-                session, report_id, "workflow_start_failed"
+                session, report_id, ReportStatus.WORKFLOW_START_FAILED
             )
             await session.commit()
         except Exception:
@@ -187,4 +224,4 @@ async def reprocess_report(
             detail=f"workflow start failed: {err}",
         ) from err
 
-    return ReprocessResponse(report_id=report_id, status="queued")
+    return ReprocessResponse(report_id=report_id, status=ReportStatus.QUEUED)
