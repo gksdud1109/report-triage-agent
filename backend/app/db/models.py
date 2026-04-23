@@ -24,7 +24,13 @@ class Report(Base):
     report_metadata: Mapped[dict] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    # 클라이언트가 동일 페이로드 재시도 시 한 건만 생성되도록 사용. 헤더가
+    # 없으면 NULL이고, NULL은 unique 제약에서 서로 다른 값으로 취급되므로
+    # 기존 동작(매 요청 새 row)을 깨지 않는다 (PostgreSQL 표준).
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
