@@ -39,6 +39,15 @@ docker compose down -v    # 초기화
 
 ## 동작 검증
 
+### 0. 단위·워크플로 테스트
+
+```bash
+docker compose exec api pytest
+# 28 passed in ~1s (워크플로 테스트는 첫 실행 시 Temporal test-server 다운로드 ~5s)
+```
+
+순수 함수 27개(classifier/routing/priority/review) + workflow happy-path 1개. 워크플로 테스트는 `WorkflowEnvironment.start_time_skipping()`에 가짜 activity를 주입해 단계 순서/상태 전파만 확인한다 (DB·NATS 미접근).
+
 ### 1. 헬스체크
 
 ```bash

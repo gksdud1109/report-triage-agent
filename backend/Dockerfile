@@ -9,8 +9,9 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY app ./app
+COPY tests ./tests
 
-RUN pip install --upgrade pip && pip install .
+RUN pip install --upgrade pip && pip install ".[dev]"
 
 EXPOSE 8000
 
