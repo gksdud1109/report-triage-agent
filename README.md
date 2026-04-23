@@ -36,8 +36,10 @@ docker compose up -d --build --wait
 
 ```bash
 docker compose down       # DB 유지
-docker compose down -v    # 초기화
+docker compose down -v    # 초기화 (스키마 변경 후엔 이걸 써야 한다)
 ```
+
+> **스키마 변경 시 주의.** Alembic을 의도적으로 생략했기 때문에(§설계 의사결정) `Base.metadata.create_all`은 *없는 테이블만* 만든다. 컬럼 추가/제약 변경은 반영되지 않으므로 모델을 바꿨다면 `docker compose down -v` 후 재기동해야 한다. 운영 단계에서는 마이그레이션 1개를 추가하는 게 첫 단계.
 
 ## 동작 검증
 
@@ -45,10 +47,16 @@ docker compose down -v    # 초기화
 
 ```bash
 docker compose exec api pytest
-# 28 passed in ~1s (워크플로 테스트는 첫 실행 시 Temporal test-server 다운로드 ~5s)
+# 38 passed in ~4s (워크플로 테스트는 첫 실행 시 Temporal test-server 다운로드 ~5s)
 ```
 
-순수 함수 27개(classifier/routing/priority/review) + workflow happy-path 1개. 워크플로 테스트는 `WorkflowEnvironment.start_time_skipping()`에 가짜 activity를 주입해 단계 순서/상태 전파만 확인한다 (DB·NATS 미접근).
+구성:
+- 순수 함수 27개 (classifier/routing/priority/review)
+- 이벤트 핸들러 5개 (decode_subject 화이트리스트·malformed payload 처리)
+- publisher dedup 배선 3개 (`Nats-Msg-Id` 헤더가 publish 시 정확히 들어가는지)
+- 워크플로 3개: happy-path / publish 실패 후에도 mark_classified 도달(best-effort) / route 실패 시 mark_failed
+
+워크플로 테스트는 `WorkflowEnvironment.start_time_skipping()`에 가짜 activity를 주입해 단계 순서·상태 전파·실패 경로 정책을 확인한다 (DB·NATS 미접근).
 
 ### 1. 헬스체크
 
@@ -135,11 +143,21 @@ curl -sS http://localhost:8000/metrics/events | jq
 | 메서드 | 경로 | 용도 |
 |---|---|---|
 | `GET`  | `/health` | 헬스체크 |
-| `POST` | `/reports` | 신고 생성 + workflow 시작 (202) |
+| `POST` | `/reports` | 신고 생성 + workflow 시작 (202). `Idempotency-Key` 헤더 지원 |
 | `GET`  | `/reports/{report_id}` | 신고 + 분류 결과 조회 |
 | `POST` | `/reports/{report_id}/reprocess` | 재처리 시작 (202, 어떤 상태에서도 즉시 가능) |
 | `GET`  | `/queues/{queue_name}/reports` | 큐별 신고 요약 목록 (커서 페이지네이션) |
 | `GET`  | `/metrics/events` | JetStream 후속 소비자 카운터 |
+
+**POST /reports 멱등성.** `Idempotency-Key` 헤더를 보내면 같은 키로 재요청해도 두 번째 요청은 새 row를 만들지 않고 기존 `report_id`를 그대로 돌려준다. 클라이언트가 응답 유실로 retry할 때 중복 신고가 안 만들어진다. 헤더가 없으면 매 요청 새 row(기존 동작 유지). 동시 요청 race는 DB unique 제약 + IntegrityError 재조회로 흡수한다.
+
+```bash
+KEY=$(uuidgen)
+curl -sS -X POST http://localhost:8000/reports \
+  -H "Idempotency-Key: $KEY" -H 'content-type: application/json' \
+  --data-binary @samples/spam.json | jq .report_id
+# 같은 KEY로 다시 보내도 동일 report_id 반환
+```
 
 상세 스펙: [`docs/04-api-spec.md`](./docs/04-api-spec.md)
 
@@ -149,7 +167,7 @@ curl -sS http://localhost:8000/metrics/events | jq
 - **장기 흐름은 Temporal workflow.** background task를 안 쓴 이유는 프로세스 재시작 후에도 추적 가능해야 하고(NFR-2), 단계별 retry/fallback이 필요하기 때문이다.
 - **NATS JetStream은 "후속 시스템 경계".** 핵심 처리 엔진이 아니라 다운스트림 소비자가 FastAPI 호출 없이 결과를 받아갈 수 있게 하는 비동기 경계로 사용한다(NFR-3). 그 경계를 프로세스 경계로도 실체화하기 위해 후속 소비자(`consumer`)는 worker와 별도 컨테이너로 분리했고, durable subscription 두 개로 메시지를 받아 `event_metrics` 카운터에 누적한다.
 - **`reports.status`가 단일 진실 원본.** API는 Temporal workflow execution 상태를 직접 참조하지 않는다. activity가 DB에 상태를 기록하고, API는 DB만 읽는다 (`docs/03-product-requirements.md` FR-2). workflow 시작 자체가 실패하면 status를 `workflow_start_failed`로 명시 — 운영자가 GET 한 번으로 "분류가 실패"인지 "workflow가 시작조차 못 했는지" 구분할 수 있게 한다.
-- **NATS publish는 best-effort.** classification·queue_item이 DB에 commit된 뒤의 `publish_triage_events_activity` 실패는 workflow에서 격리해서 잡고 그대로 `mark_classified`로 진행한다 (재시도는 `_DEFAULT_RETRY`로 3회 시도 후 포기). 이유: NATS는 "후속 시스템 경계"이지 핵심 처리 엔진이 아니라서, downstream 카운터가 비는 것보다 `reports.status`를 `failed`로 되돌려 "분류 자체가 실패"한 것처럼 보이는 게 운영자에게 더 큰 혼선이다. 누락분은 `/metrics/events`로 관찰 가능하고, 운영성이 더 중요해지면 outbox 패턴으로 강화한다.
+- **NATS publish는 best-effort + publisher-side dedup.** classification·queue_item이 DB에 commit된 뒤의 `publish_triage_events_activity` 실패는 workflow에서 격리해서 잡고 그대로 `mark_classified`로 진행한다 (재시도는 `_DEFAULT_RETRY`로 3회 시도 후 포기). NATS는 "후속 시스템 경계"이지 핵심 처리 엔진이 아니라서, downstream 카운터가 비는 것보다 `reports.status`를 `failed`로 되돌려 "분류 자체가 실패"한 것처럼 보이는 게 운영자에게 더 큰 혼선이다. 다만 `publish_triaged → publish_queue_routed` 두 publish 중 한쪽이 실패해 워크플로 retry로 같은 메시지가 중복 발행되는 시나리오를 막기 위해 publisher가 `Nats-Msg-Id: {subject}:{report_id}` 헤더를 박고, JetStream stream에 `duplicate_window=120s`를 설정한다. 누락분은 `/metrics/events`로 관찰 가능하고, 운영성이 더 중요해지면 outbox 패턴으로 강화한다.
 - **분류는 규칙 기반.** 정확도보다 운영 가능한 흐름을 우선한다. classifier 인터페이스는 `(reason_code, description, metadata) -> ClassificationResult` 한 줄짜리라 추후 LLM으로 교체 가능.
 - **DB 스키마는 `create_all`로 생성.** MVP 속도를 위해 Alembic을 생략하고 앱 lifespan에서 테이블을 만든다. 운영성이 필요해지는 시점에 초기 migration 1개를 추가하면 된다 (`docs/05-data-model.md` §7.2).
 - **재처리는 upsert-overwrite + active workflow ≤ 1.** classification·queue item은 `report_id` 기준으로 최신 1건만 유지하고 이력 테이블은 두지 않는다. workflow_id는 모든 run에 대해 `report-triage-{report_id}` 단일 ID를 사용하고, Temporal `WorkflowIDReusePolicy.TERMINATE_IF_RUNNING`으로 새 run 시작 시 기존 running run을 자동 종료시킨다. 결과는 새 run의 결과로 덮어써지고 stale run의 늦은 write는 cancellation으로 차단된다. API 게이트는 두지 않으며 어떤 상태에서도 운영자가 즉시 재분류할 수 있다 (`docs/06-workflow-and-events.md` §workflow_id 전략).
