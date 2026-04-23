@@ -7,6 +7,7 @@
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +23,7 @@ from app.schemas.reports import (
     ReportCreateResponse,
     ReportDetailResponse,
     ReportPayload,
+    ReprocessResponse,
 )
 from app.services import reports_repo
 from app.temporal.workflows import ReportTriageWorkflow
@@ -113,3 +115,51 @@ async def get_report(
         created_at=report.created_at,
         updated_at=report.updated_at,
     )
+
+
+@router.post(
+    "/{report_id}/reprocess",
+    response_model=ReprocessResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reprocess_report(
+    report_id: str,
+    session: AsyncSession = Depends(get_session),
+    temporal: Client = Depends(get_temporal_client),
+) -> ReprocessResponse:
+    """기존 신고를 다시 분류한다.
+
+    - 없는 신고: 404
+    - 진행 중(`processing`): 422 — 기존 workflow가 종료될 때까지 기다린다.
+    - 그 외: status를 `queued`로 되돌리고
+      `report-triage-{report_id}-{epoch_ms}` workflow_id로 새 run을 시작한다.
+    """
+    settings = get_settings()
+    report = await reports_repo.get_report(session, report_id)
+    if report is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report not found")
+    if report.status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="report is currently processing; retry after it settles",
+        )
+
+    await reports_repo.reset_report_for_reprocess(session, report_id)
+    await session.commit()
+
+    workflow_id = f"report-triage-{report_id}-{int(time.time() * 1000)}"
+    try:
+        await temporal.start_workflow(
+            ReportTriageWorkflow.run,
+            report_id,
+            id=workflow_id,
+            task_queue=settings.temporal_task_queue,
+        )
+    except Exception as err:  # pragma: no cover - Temporal 장애 시 운영자가 재시도
+        logger.exception("failed to start reprocess workflow for %s", report_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"workflow start failed: {err}",
+        ) from err
+
+    return ReprocessResponse(report_id=report_id, status="queued")
