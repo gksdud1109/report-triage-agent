@@ -88,10 +88,22 @@ async def create_report(
             task_queue=settings.temporal_task_queue,
         )
     except Exception as err:  # pragma: no cover - Temporal 장애 시 운영자가 재시도
+        # 신고는 이미 저장됐으므로 클라이언트가 report_id를 알아야
+        # POST /reports/{report_id}/reprocess로 복구할 수 있다.
+        # (FR-1: 저장 성공/실패와 workflow 시작을 분리해서 다룬다.)
         logger.exception("failed to start triage workflow for %s", report_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"workflow start failed: {err}",
+            detail={
+                "report_id": report_id,
+                "status": "queued",
+                "error": "workflow start failed",
+                "message": (
+                    "report saved but triage workflow could not be started; "
+                    "retry via POST /reports/{report_id}/reprocess once Temporal recovers"
+                ),
+                "cause": str(err),
+            },
         ) from err
 
     return ReportCreateResponse(report_id=report_id, status="queued")
