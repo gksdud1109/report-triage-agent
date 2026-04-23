@@ -207,3 +207,60 @@ async def test_workflow_treats_publish_failure_as_best_effort_and_still_marks_cl
     assert "mark_failed" not in CALLED
     # publish는 retry로 여러 번 호출됐다 (_DEFAULT_RETRY maximum_attempts=3).
     assert CALLED.count("publish") >= 1
+
+
+@activity.defn(name="route_queue_activity")
+async def fake_route_always_fails(report_id: str, queue_name: str) -> None:
+    CALLED.append("route")
+    raise RuntimeError("simulated DB outage on queue insert")
+
+
+# happy-path와 동일하지만 route만 실패하는 fake set.
+ROUTE_FAIL_ACTIVITIES = [
+    fake_load,
+    fake_mark_processing,
+    fake_classify,
+    fake_priority,
+    fake_review,
+    fake_persist,
+    fake_route_always_fails,
+    fake_publish,
+    fake_mark_classified,
+    fake_mark_failed,
+]
+
+
+@pytest.mark.asyncio
+async def test_workflow_marks_failed_when_route_queue_fails_after_persist() -> None:
+    """persist 성공 후 route 실패 시 reports.status가 failed로 기록되어야 한다.
+
+    이건 publish 실패와는 다르다. route_queue가 실패하면 큐 아이템이 없어서
+    운영자가 신고를 어떤 큐에서도 못 본다. classification만 DB에 떠 있는 상태는
+    "분류는 됐는데 큐 배정이 안 된 어정쩡한 상태" — 운영자에게 명시적으로 failed로
+    노출해서 reprocess를 유도한다. (publish best-effort 정책과 의도적으로 다른
+    경계.)
+    """
+    CALLED.clear()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        task_queue = f"test-tq-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[ReportTriageWorkflow],
+            activities=ROUTE_FAIL_ACTIVITIES,
+        ):
+            with pytest.raises(Exception):
+                await env.client.execute_workflow(
+                    ReportTriageWorkflow.run,
+                    "rpt_test_route_fail",
+                    id=f"wf-{uuid.uuid4().hex[:8]}",
+                    task_queue=task_queue,
+                )
+
+    # route 시도가 있었고
+    assert "route" in CALLED
+    # mark_failed는 catch-all에서 호출됐고
+    assert "mark_failed" in CALLED
+    # mark_classified와 publish는 도달하지 않았다.
+    assert "mark_classified" not in CALLED
+    assert "publish" not in CALLED
