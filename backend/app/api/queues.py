@@ -1,6 +1,6 @@
 """큐별 신고 목록 조회 API."""
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_session
@@ -20,15 +20,19 @@ async def list_queue_reports(
 ) -> QueueListResponse:
     """큐 아이템과 분류 결과를 조인해서 요약 목록으로 반환한다.
 
-    페이지네이션은 id desc 키셋 기반.
+    페이지네이션은 `(enqueued_at desc, id desc)` 키셋 + 복합 cursor.
     """
-    pairs, next_cursor = await reports_repo.list_queue_items(
-        session,
-        queue_name=queue_name,
-        status=status,
-        limit=limit,
-        cursor=cursor,
-    )
+    try:
+        pairs, next_cursor = await reports_repo.list_queue_items(
+            session,
+            queue_name=queue_name,
+            status=status,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as err:
+        # `status`는 본 함수의 쿼리 파라미터에 의해 shadow되므로 정수 상태코드를 사용한다.
+        raise HTTPException(status_code=400, detail=str(err)) from err
 
     items: list[QueueItemPayload] = []
     for queue_item, classification in pairs:

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -117,6 +117,20 @@ async def upsert_queue_item(
     return existing
 
 
+def _encode_cursor(enqueued_at: datetime, item_id: str) -> str:
+    """`{ISO8601}|{id}` 형태의 사람이 읽기 쉬운 cursor 토큰."""
+    return f"{enqueued_at.isoformat()}|{item_id}"
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        ts_str, item_id = cursor.split("|", 1)
+        ts = datetime.fromisoformat(ts_str)
+    except ValueError as err:
+        raise ValueError(f"invalid cursor: {cursor!r}") from err
+    return ts, item_id
+
+
 async def list_queue_items(
     session: AsyncSession,
     *,
@@ -125,6 +139,12 @@ async def list_queue_items(
     limit: int,
     cursor: str | None,
 ) -> tuple[list[tuple[ReviewQueueItem, ReportClassification | None]], str | None]:
+    """큐 아이템을 enqueued_at 내림차순으로 조회한다.
+
+    pagination: `(enqueued_at, id)` 복합 키셋 + Postgres row-value 비교.
+    cursor는 `{ISO8601 enqueued_at}|{queue_item_id}` 토큰. id는 랜덤 token_hex라
+    단일 정렬용으로는 부적절하지만 동순간 enqueued_at에 대한 tiebreak로 사용한다.
+    """
     stmt = (
         select(ReviewQueueItem, ReportClassification)
         .join(
@@ -138,11 +158,18 @@ async def list_queue_items(
     if status is not None:
         stmt = stmt.where(ReviewQueueItem.queue_status == status)
     if cursor is not None:
-        stmt = stmt.where(ReviewQueueItem.id < cursor)
+        cursor_ts, cursor_id = _decode_cursor(cursor)
+        # Postgres tuple 비교: (a, b) < (x, y) ↔ a<x OR (a=x AND b<y)
+        stmt = stmt.where(
+            tuple_(ReviewQueueItem.enqueued_at, ReviewQueueItem.id) < (cursor_ts, cursor_id)
+        )
     stmt = stmt.limit(limit + 1)
 
     rows = (await session.execute(stmt)).all()
     has_next = len(rows) > limit
     rows = rows[:limit]
-    next_cursor = rows[-1][0].id if has_next and rows else None
+    next_cursor: str | None = None
+    if has_next and rows:
+        last_item = rows[-1][0]
+        next_cursor = _encode_cursor(last_item.enqueued_at, last_item.id)
     return [(r[0], r[1]) for r in rows], next_cursor
