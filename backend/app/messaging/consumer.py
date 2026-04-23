@@ -23,10 +23,14 @@ import signal
 from typing import Awaitable, Callable
 
 from app.core.config import get_settings
-from app.db.session import session_scope
+from app.db.base import Base
+from app.db.session import engine, session_scope
 from app.messaging import nats_client
 from app.messaging.handlers import decode_subject, record_event
 from app.messaging.streams import SUBJECT_QUEUE_ROUTED, SUBJECT_REPORT_TRIAGED
+
+# Base.metadata가 EventMetric/Report 등 모델을 인식하도록 import만 해둔다.
+from app.db import models  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,12 @@ def _make_handler(subject_label: str) -> Callable[[object], Awaitable[None]]:
 
 async def _run() -> None:
     settings = get_settings()
+
+    # consumer는 api 기동에 의존하지 않는다 — event_metrics 테이블이 없으면
+    # 직접 만든다. 동시 create_all은 Postgres CREATE TABLE IF NOT EXISTS로 안전.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     js = await nats_client.connect()
 
     await js.subscribe(
@@ -96,6 +106,7 @@ async def _run() -> None:
     await stop.wait()
     logger.info("jetstream consumer stopping")
     await nats_client.close()
+    await engine.dispose()
 
 
 def main() -> None:

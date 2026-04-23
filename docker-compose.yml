@@ -115,15 +115,14 @@ services:
   consumer:
     # JetStream 후속 소비자. 의도적으로 worker와 분리된 별도 프로세스다 —
     # "후속 시스템 경계로서의 NATS" 의사결정을 프로세스 경계로 실체화하기 위해.
+    # api에 의존하지 않는다: consumer가 자체적으로 event_metrics 테이블을
+    # create_all 하므로 api 장애가 consumer 기동을 막지 않는다.
     build:
       context: ./backend
     depends_on:
       postgres:
         condition: service_healthy
       nats:
-        condition: service_started
-      api:
-        # api lifespan에서 event_metrics 테이블이 create_all로 생성된다.
         condition: service_started
     environment:
       DATABASE_URL: postgresql+asyncpg://triage:triage@postgres:5432/triage
