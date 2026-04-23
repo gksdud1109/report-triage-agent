@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -81,3 +81,21 @@ class ReviewQueueItem(Base):
     )
 
     report: Mapped[Report] = relationship(back_populates="queue_item")
+
+
+class EventMetric(Base):
+    """JetStream 이벤트 후속 소비자가 누적하는 단순 카운터.
+
+    consumer 프로세스가 `report.triaged`/`queue.routed`를 받을 때마다
+    subject 단위로 +1 한다. "publish만 한다"가 아니라 후속 소비자가
+    실제로 읽는다는 사실을 운영 화면(`GET /metrics/events`)에 노출하기
+    위해 둔, 의도적으로 얇은 테이블이다.
+    """
+
+    __tablename__ = "event_metrics"
+
+    subject: Mapped[str] = mapped_column(String(64), primary_key=True)
+    count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )

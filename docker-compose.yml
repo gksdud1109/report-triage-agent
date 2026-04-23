@@ -1,12 +1,13 @@
 # report-triage-agent MVP 로컬 개발 스택.
 #
-# `docker compose up -d`로 아래 7개 서비스를 기동한다.
+# `docker compose up -d`로 아래 8개 서비스를 기동한다.
 #   - postgres       : 앱 DB + Temporal DB를 공유하는 단일 Postgres (DB 3개)
 #   - nats           : JetStream 활성화된 NATS
 #   - temporal       : Postgres 백엔드로 auto-setup되는 Temporal 서버
 #   - temporal-ui    : workflow 관측용 UI
 #   - api            : FastAPI / uvicorn
 #   - worker         : 동일 이미지, command만 다른 Temporal worker
+#   - consumer       : JetStream 후속 소비자 (event_metrics 카운터 누적)
 #   - frontend       : 운영자 큐 브라우저 (Next.js dev 서버)
 
 services:
@@ -110,6 +111,25 @@ services:
       NATS_URL: nats://nats:4222
       NATS_STREAM: report-triage
     command: ["python", "-m", "app.temporal.worker"]
+
+  consumer:
+    # JetStream 후속 소비자. 의도적으로 worker와 분리된 별도 프로세스다 —
+    # "후속 시스템 경계로서의 NATS" 의사결정을 프로세스 경계로 실체화하기 위해.
+    build:
+      context: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      api:
+        # api lifespan에서 event_metrics 테이블이 create_all로 생성된다.
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://triage:triage@postgres:5432/triage
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: report-triage
+    command: ["python", "-m", "app.messaging"]
 
   frontend:
     build:

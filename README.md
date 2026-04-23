@@ -29,6 +29,7 @@ docker compose up -d --build --wait
 | `temporal-ui` | `8080` | Workflow 실행 트레이스 확인 |
 | `api` | `8000` | FastAPI |
 | `worker` | — | Temporal worker |
+| `consumer` | — | JetStream 후속 소비자 (event_metrics 카운터 누적) |
 | `frontend` | `3000` | 운영자 큐 브라우저 (Next.js 데모 화면) |
 
 종료:
@@ -135,7 +136,19 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 # 신고 1건당 2개 이벤트(triaged, routed)가 쌓인다
 ```
 
-### 8. 운영자 큐 브라우저 (프론트)
+### 8. JetStream 후속 소비자 카운터
+
+```bash
+curl -sS http://localhost:8000/metrics/events | jq
+# {"items":[{"subject":"queue.routed","count":N,...},{"subject":"report.triaged","count":N,...}]}
+```
+
+신고 1건당 두 카운터가 각각 +1 된다. consumer 컨테이너의 durable subscription
+두 개(`triage-metrics-triaged`, `triage-metrics-routed`)가 메시지를 ack하고
+`event_metrics` 테이블에 누적한다. 즉 publish만 하지 않고 후속 소비자가
+실제로 읽는다는 사실을 운영 화면 한 줄로 확인할 수 있다.
+
+### 9. 운영자 큐 브라우저 (프론트)
 
 브라우저에서 [http://localhost:3000](http://localhost:3000) → 4개 큐 탭(`fraud-review` / `spam-review` / `abuse-review` / `general-review`) 중 하나를 선택해 큐별 분류 결과를 표 형태로 확인.
 얇은 데모용 Next.js 한 페이지이며, 내부적으로 `GET /queues/{queue}/reports`만 호출한다 (인증·필터·페이지네이션 UI 없음).
@@ -149,6 +162,7 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 | `GET`  | `/reports/{report_id}` | 신고 + 분류 결과 조회 |
 | `POST` | `/reports/{report_id}/reprocess` | 재처리 시작 (202, 어떤 상태에서도 즉시 가능) |
 | `GET`  | `/queues/{queue_name}/reports` | 큐별 신고 요약 목록 (커서 페이지네이션) |
+| `GET`  | `/metrics/events` | JetStream 후속 소비자 카운터 |
 
 상세 스펙: [`docs/04-api-spec.md`](./docs/04-api-spec.md)
 
@@ -156,7 +170,7 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 
 - **FastAPI는 얇게.** 라우터는 입력 검증·DB 저장·workflow 시작만 담당한다. 장기 실행 흐름은 Temporal로 넘긴다.
 - **장기 흐름은 Temporal workflow.** background task를 안 쓴 이유는 프로세스 재시작 후에도 추적 가능해야 하고(NFR-2), 단계별 retry/fallback이 필요하기 때문이다.
-- **NATS JetStream은 "후속 시스템 경계".** 핵심 처리 엔진이 아니라 다운스트림 소비자가 FastAPI 호출 없이 결과를 받아갈 수 있게 하는 비동기 경계로 사용한다(NFR-3).
+- **NATS JetStream은 "후속 시스템 경계".** 핵심 처리 엔진이 아니라 다운스트림 소비자가 FastAPI 호출 없이 결과를 받아갈 수 있게 하는 비동기 경계로 사용한다(NFR-3). 그 경계를 프로세스 경계로도 실체화하기 위해 후속 소비자(`consumer`)는 worker와 별도 컨테이너로 분리했고, durable subscription 두 개로 메시지를 받아 `event_metrics` 카운터에 누적한다.
 - **`reports.status`가 단일 진실 원본.** API는 Temporal workflow execution 상태를 직접 참조하지 않는다. activity가 DB에 상태를 기록하고, API는 DB만 읽는다 (`docs/03-product-requirements.md` FR-2).
 - **분류는 규칙 기반.** 정확도보다 운영 가능한 흐름을 우선한다. classifier 인터페이스는 `(reason_code, description, metadata) -> ClassificationResult` 한 줄짜리라 추후 LLM으로 교체 가능.
 - **DB 스키마는 `create_all`로 생성.** MVP 속도를 위해 Alembic을 생략하고 앱 lifespan에서 테이블을 만든다. 운영성이 필요해지는 시점에 초기 migration 1개를 추가하면 된다 (`docs/05-data-model.md` §7.2).
@@ -172,7 +186,7 @@ backend/
     db/          # SQLAlchemy 모델·세션
     schemas/     # Pydantic 스키마 (요청/응답/이벤트)
     services/    # 분류·우선순위·라우팅 순수 로직 + repo
-    messaging/   # NATS JetStream 어댑터
+    messaging/   # NATS JetStream publish + 후속 소비자(consumer.py) 엔트리포인트
     temporal/    # workflow / activity / client / worker
     main.py      # FastAPI 앱 + lifespan
   Dockerfile
