@@ -143,3 +143,67 @@ async def test_workflow_happy_path_invokes_activities_in_order_and_returns_summa
         "mark_classified",
     ]
     assert "mark_failed" not in CALLED
+
+
+@activity.defn(name="publish_triage_events_activity")
+async def fake_publish_always_fails(
+    report_id: str,
+    category: str,
+    priority_level: str,
+    requires_review: bool,
+    confidence: float,
+    queue_name: str,
+) -> None:
+    CALLED.append("publish")
+    raise RuntimeError("simulated NATS outage")
+
+
+# happy-path와 동일하지만 publish만 실패하는 fake set.
+PUBLISH_FAIL_ACTIVITIES = [
+    fake_load,
+    fake_mark_processing,
+    fake_classify,
+    fake_priority,
+    fake_review,
+    fake_persist,
+    fake_route,
+    fake_publish_always_fails,
+    fake_mark_classified,
+    fake_mark_failed,
+]
+
+
+@pytest.mark.asyncio
+async def test_workflow_treats_publish_failure_as_best_effort_and_still_marks_classified() -> None:
+    """publish가 끝까지 실패해도 reports.status는 classified가 돼야 한다.
+
+    이유: classification/queue_item은 이미 DB에 commit 됐다. publish 실패만으로
+    종단 상태를 failed로 되돌리면 운영자가 상태만 보고 "분류 자체가 실패한 것"으로
+    오해한다. publish는 후속 시스템 경계라 best-effort로 처리한다.
+    (워크플로 _DEFAULT_RETRY로 publish가 3회 재시도되므로 짧지 않음 — time skipping
+    환경이 sleep을 압축한다.)
+    """
+    CALLED.clear()
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        task_queue = f"test-tq-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[ReportTriageWorkflow],
+            activities=PUBLISH_FAIL_ACTIVITIES,
+        ):
+            result = await env.client.execute_workflow(
+                ReportTriageWorkflow.run,
+                "rpt_test_publish_fail",
+                id=f"wf-{uuid.uuid4().hex[:8]}",
+                task_queue=task_queue,
+            )
+
+    # workflow는 정상 결과를 반환하고
+    assert result["report_id"] == "rpt_test_publish_fail"
+    assert result["queue_name"] == "spam-review"
+    # mark_classified는 도달했지만 mark_failed는 호출되지 않았다.
+    assert "mark_classified" in CALLED
+    assert "mark_failed" not in CALLED
+    # publish는 retry로 여러 번 호출됐다 (_DEFAULT_RETRY maximum_attempts=3).
+    assert CALLED.count("publish") >= 1

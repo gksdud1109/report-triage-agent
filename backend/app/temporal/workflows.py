@@ -79,19 +79,30 @@ class ReportTriageWorkflow:
                 retry_policy=_DEFAULT_RETRY,
             )
 
-            await workflow.execute_activity(
-                activities.publish_triage_events_activity,
-                args=[
-                    report_id,
-                    classification["category"],
-                    priority_level,
-                    requires_review,
-                    classification["confidence"],
-                    queue_name,
-                ],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=_DEFAULT_RETRY,
-            )
+            # publish는 best-effort. DB 상태(classification/queue)는 이미 commit 됐고
+            # NATS는 "후속 시스템 경계"이므로, publish 실패가 reports.status를 failed로
+            # 되돌리는 일은 없어야 한다. 재시도가 다 소진되면 로그만 남기고 계속 진행한다.
+            # downstream 카운터가 비는 것은 운영자가 /metrics/events로 관찰 가능하다.
+            try:
+                await workflow.execute_activity(
+                    activities.publish_triage_events_activity,
+                    args=[
+                        report_id,
+                        classification["category"],
+                        priority_level,
+                        requires_review,
+                        classification["confidence"],
+                        queue_name,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=_DEFAULT_RETRY,
+                )
+            except ActivityError:
+                workflow.logger.warning(
+                    "publish_triage_events failed after retries; "
+                    "DB state is already committed, continuing to mark_classified",
+                    extra={"report_id": report_id},
+                )
 
             await workflow.execute_activity(
                 activities.mark_report_classified_activity,
