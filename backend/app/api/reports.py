@@ -92,12 +92,21 @@ async def create_report(
         # 신고는 이미 저장됐으므로 클라이언트가 report_id를 알아야
         # POST /reports/{report_id}/reprocess로 복구할 수 있다.
         # (FR-1: 저장 성공/실패와 workflow 시작을 분리해서 다룬다.)
+        # status를 명시적인 sentinel로 바꿔 두면 GET /reports/{id}만 봐도
+        # "workflow가 시작조차 못 했다"를 운영자가 구분할 수 있다.
         logger.exception("failed to start triage workflow for %s", report_id)
+        try:
+            await reports_repo.update_report_status(
+                session, report_id, "workflow_start_failed"
+            )
+            await session.commit()
+        except Exception:
+            logger.exception("failed to mark workflow_start_failed for %s", report_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "report_id": report_id,
-                "status": "queued",
+                "status": "workflow_start_failed",
                 "error": "workflow start failed",
                 "message": (
                     "report saved but triage workflow could not be started; "
@@ -166,6 +175,13 @@ async def reprocess_report(
         )
     except Exception as err:  # pragma: no cover - Temporal 장애 시 운영자가 재시도
         logger.exception("failed to start reprocess workflow for %s", report_id)
+        try:
+            await reports_repo.update_report_status(
+                session, report_id, "workflow_start_failed"
+            )
+            await session.commit()
+        except Exception:
+            logger.exception("failed to mark workflow_start_failed for %s", report_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"workflow start failed: {err}",
