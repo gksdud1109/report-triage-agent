@@ -1,12 +1,13 @@
 # report-triage-agent MVP 로컬 개발 스택.
 #
-# `docker compose up -d`로 아래 6개 서비스를 기동한다.
+# `docker compose up -d`로 아래 7개 서비스를 기동한다.
 #   - postgres       : 앱 DB + Temporal DB를 공유하는 단일 Postgres (DB 3개)
 #   - nats           : JetStream 활성화된 NATS
 #   - temporal       : Postgres 백엔드로 auto-setup되는 Temporal 서버
 #   - temporal-ui    : workflow 관측용 UI
 #   - api            : FastAPI / uvicorn
 #   - worker         : 동일 이미지, command만 다른 Temporal worker
+#   - frontend       : 운영자 큐 브라우저 (Next.js dev 서버)
 
 services:
   postgres:

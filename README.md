@@ -29,6 +29,7 @@ docker compose up -d --build --wait
 | `temporal-ui` | `8080` | Workflow 실행 트레이스 확인 |
 | `api` | `8000` | FastAPI |
 | `worker` | — | Temporal worker |
+| `frontend` | `3000` | 운영자 큐 브라우저 (Next.js 데모 화면) |
 
 종료:
 
@@ -134,6 +135,11 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 # 신고 1건당 2개 이벤트(triaged, routed)가 쌓인다
 ```
 
+### 8. 운영자 큐 브라우저 (프론트)
+
+브라우저에서 [http://localhost:3000](http://localhost:3000) → 4개 큐 탭(`fraud-review` / `spam-review` / `abuse-review` / `general-review`) 중 하나를 선택해 큐별 분류 결과를 표 형태로 확인.
+얇은 데모용 Next.js 한 페이지이며, 내부적으로 `GET /queues/{queue}/reports`만 호출한다 (인증·필터·페이지네이션 UI 없음).
+
 ## API 요약
 
 | 메서드 | 경로 | 용도 |
@@ -171,6 +177,7 @@ backend/
     main.py      # FastAPI 앱 + lifespan
   Dockerfile
   scripts/init-db.sh  # postgres 초기화 시 temporal DB 생성
+frontend/        # Next.js 14 App Router 데모 화면 (page.tsx 한 장)
 docker-compose.yml
 docs/            # 기획·요구사항·API·데이터모델·워크플로우 문서
 ```
