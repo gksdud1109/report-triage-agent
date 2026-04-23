@@ -17,7 +17,6 @@ from app.api.reports import router as reports_router
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import engine
-from app.messaging import nats_client
 from app.temporal import client as temporal_client
 
 # create_all 이전에 Base.metadata가 모델을 인식하도록 import만 해둔다.
@@ -33,19 +32,20 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     settings = get_settings()
-    logger.info("starting api; db=%s nats=%s temporal=%s",
-                settings.database_url, settings.nats_url, settings.temporal_host)
+    # API 프로세스는 NATS에 publish하지 않는다 (publish는 worker activity, consume는
+    # 별도 consumer 프로세스). NATS는 lifespan에 묶지 않아 NATS 장애가 API 기동을
+    # 막지 않게 한다.
+    logger.info("starting api; db=%s temporal=%s",
+                settings.database_url, settings.temporal_host)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    await nats_client.connect()
     await temporal_client.get_client()
 
     try:
         yield
     finally:
-        await nats_client.close()
         await temporal_client.close()
         await engine.dispose()
 
