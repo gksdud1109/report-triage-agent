@@ -8,10 +8,11 @@ workflow 이름:
 
 ### workflow_id 전략
 
-- 최초 실행: `report-triage-{report_id}`
-- 재처리 실행: `report-triage-{report_id}-{epoch_ms}`
-  - 같은 `report_id`로 여러 run이 생길 수 있지만, MVP에서는 DB 쪽 결과가 upsert-overwrite되므로 충돌 없이 "최신 run이 덮어쓰는" 모델이 유지된다.
-  - 이전 run을 별도로 cancel하지 않는다. 이전 run이 먼저 완료되어 덮어쓰더라도 곧이어 최신 run이 다시 덮어쓴다.
+- 모든 run에 대해 단일 ID `report-triage-{report_id}`를 사용한다.
+- 시작 시 `WorkflowIDReusePolicy.TERMINATE_IF_RUNNING`을 적용해 기존 running run을 자동 종료시킨다.
+  - 한 시점 active workflow ≤ 1을 Temporal이 보장한다.
+  - 결과는 새 run의 결과로 덮어써지고, 종료된 run의 늦은 write는 cancellation으로 차단된다.
+  - Temporal UI에서는 같은 workflow_id 아래 run history로 묶여 보이므로 디버깅 추적이 쉽다.
 - workflow 입력: `report_id` 문자열 하나.
 
 ### status 소유권

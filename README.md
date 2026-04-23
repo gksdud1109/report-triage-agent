@@ -94,6 +94,18 @@ curl -sS http://localhost:8000/reports/<report_id> | jq
 curl -sS 'http://localhost:8000/queues/fraud-review/reports?limit=10' | jq
 ```
 
+페이지네이션은 `(enqueued_at desc, id desc)` 복합 키셋이고 cursor는 `{ISO8601}|{queue_item_id}` 토큰이다.
+ISO8601의 `+00:00`은 그대로 GET 파라미터에 박으면 공백으로 디코드되니 **percent-encode 필수**:
+
+```bash
+NEXT=$(curl -sS 'http://localhost:8000/queues/spam-review/reports?limit=2' \
+  | jq -r '.next_cursor')
+curl -sS --get 'http://localhost:8000/queues/spam-review/reports' \
+  --data-urlencode "limit=2" --data-urlencode "cursor=$NEXT" | jq
+```
+
+잘못된 cursor는 `400 {"detail":"invalid cursor: ..."}`으로 응답한다.
+
 ### 5. 재처리
 
 ```bash
@@ -120,7 +132,7 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 | `GET`  | `/health` | 헬스체크 |
 | `POST` | `/reports` | 신고 생성 + workflow 시작 (202) |
 | `GET`  | `/reports/{report_id}` | 신고 + 분류 결과 조회 |
-| `POST` | `/reports/{report_id}/reprocess` | 재처리 시작 (202, `processing` 중이면 422) |
+| `POST` | `/reports/{report_id}/reprocess` | 재처리 시작 (202, 어떤 상태에서도 즉시 가능) |
 | `GET`  | `/queues/{queue_name}/reports` | 큐별 신고 요약 목록 (커서 페이지네이션) |
 
 상세 스펙: [`docs/04-api-spec.md`](./docs/04-api-spec.md)
@@ -133,7 +145,7 @@ curl -sS 'http://localhost:8222/jsz?streams=true' \
 - **`reports.status`가 단일 진실 원본.** API는 Temporal workflow execution 상태를 직접 참조하지 않는다. activity가 DB에 상태를 기록하고, API는 DB만 읽는다 (`docs/03-product-requirements.md` FR-2).
 - **분류는 규칙 기반.** 정확도보다 운영 가능한 흐름을 우선한다. classifier 인터페이스는 `(reason_code, description, metadata) -> ClassificationResult` 한 줄짜리라 추후 LLM으로 교체 가능.
 - **DB 스키마는 `create_all`로 생성.** MVP 속도를 위해 Alembic을 생략하고 앱 lifespan에서 테이블을 만든다. 운영성이 필요해지는 시점에 초기 migration 1개를 추가하면 된다 (`docs/05-data-model.md` §7.2).
-- **재처리는 upsert-overwrite.** classification·queue item은 `report_id` 기준으로 최신 1건만 유지하고 이력 테이블은 두지 않는다. workflow_id는 `report-triage-{report_id}-{epoch_ms}`로 새 run을 만들고 이전 run을 cancel하지 않는다 — 결과는 어차피 DB upsert로 덮어쓰여 최신 run이 이긴다 (`docs/06-workflow-and-events.md` §workflow_id 전략).
+- **재처리는 upsert-overwrite + active workflow ≤ 1.** classification·queue item은 `report_id` 기준으로 최신 1건만 유지하고 이력 테이블은 두지 않는다. workflow_id는 모든 run에 대해 `report-triage-{report_id}` 단일 ID를 사용하고, Temporal `WorkflowIDReusePolicy.TERMINATE_IF_RUNNING`으로 새 run 시작 시 기존 running run을 자동 종료시킨다. 결과는 새 run의 결과로 덮어써지고 stale run의 늦은 write는 cancellation으로 차단된다. API 게이트는 두지 않으며 어떤 상태에서도 운영자가 즉시 재분류할 수 있다 (`docs/06-workflow-and-events.md` §workflow_id 전략).
 
 ## 폴더 구조
 

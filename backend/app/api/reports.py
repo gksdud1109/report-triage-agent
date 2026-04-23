@@ -7,11 +7,11 @@
 """
 
 import logging
-import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 
 from app.api.deps import get_session, get_temporal_client
 from app.core.config import get_settings
@@ -86,6 +86,7 @@ async def create_report(
             report_id,
             id=f"report-triage-{report_id}",
             task_queue=settings.temporal_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.TERMINATE_IF_RUNNING,
         )
     except Exception as err:  # pragma: no cover - Temporal 장애 시 운영자가 재시도
         # 신고는 이미 저장됐으므로 클라이언트가 report_id를 알아야
@@ -142,30 +143,26 @@ async def reprocess_report(
     """기존 신고를 다시 분류한다.
 
     - 없는 신고: 404
-    - 진행 중(`processing`): 422 — 기존 workflow가 종료될 때까지 기다린다.
-    - 그 외: status를 `queued`로 되돌리고
-      `report-triage-{report_id}-{epoch_ms}` workflow_id로 새 run을 시작한다.
+    - 그 외: status를 `queued`로 되돌리고 안정적인 workflow_id
+      `report-triage-{report_id}`로 새 run을 시작한다. 기존 run이 진행 중이면
+      Temporal이 `TERMINATE_IF_RUNNING` 정책으로 자동 종료시키므로
+      한 시점 active workflow ≤ 1이 보장된다.
     """
     settings = get_settings()
     report = await reports_repo.get_report(session, report_id)
     if report is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="report not found")
-    if report.status == "processing":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="report is currently processing; retry after it settles",
-        )
 
     await reports_repo.reset_report_for_reprocess(session, report_id)
     await session.commit()
 
-    workflow_id = f"report-triage-{report_id}-{int(time.time() * 1000)}"
     try:
         await temporal.start_workflow(
             ReportTriageWorkflow.run,
             report_id,
-            id=workflow_id,
+            id=f"report-triage-{report_id}",
             task_queue=settings.temporal_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.TERMINATE_IF_RUNNING,
         )
     except Exception as err:  # pragma: no cover - Temporal 장애 시 운영자가 재시도
         logger.exception("failed to start reprocess workflow for %s", report_id)
