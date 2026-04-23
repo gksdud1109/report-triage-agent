@@ -110,5 +110,16 @@ services:
       NATS_STREAM: report-triage
     command: ["python", "-m", "app.temporal.worker"]
 
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - api
+    environment:
+      # 브라우저에서 직접 fetch하므로 컨테이너 호스트명이 아니라 localhost를 박는다.
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+
 volumes:
   postgres-data:

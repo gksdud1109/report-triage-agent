@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.queues import router as queues_router
@@ -50,6 +51,13 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Report Triage Agent", version="0.1.0", lifespan=lifespan)
+    # 프론트엔드(Next.js dev 서버, localhost:3000)가 직접 호출하므로 CORS를 허용한다.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.include_router(health_router)
     app.include_router(reports_router)
     app.include_router(queues_router)
