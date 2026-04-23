@@ -9,7 +9,7 @@ from nats.js.api import StreamConfig
 from nats.js.errors import NotFoundError
 
 from app.core.config import get_settings
-from app.messaging.streams import STREAM_SUBJECTS
+from app.messaging.streams import DUPLICATE_WINDOW_SECONDS, STREAM_SUBJECTS
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +47,27 @@ async def connect(max_attempts: int = 10, base_delay: float = 0.5) -> JetStreamC
     assert _nc is not None
     _js = _nc.jetstream()
 
+    # 스트림은 add 또는 update를 멱등하게 적용한다 — duplicate_window 변경이
+    # 운영 중에 들어와도 자동 반영된다 (재기동 시 nats_client.connect()에서 호출).
+    # nats-py는 duplicate_window를 초 단위 number로 받는다 (timedelta 아님).
+    desired = StreamConfig(
+        name=settings.nats_stream,
+        subjects=STREAM_SUBJECTS,
+        duplicate_window=DUPLICATE_WINDOW_SECONDS,
+    )
     try:
         await _js.stream_info(settings.nats_stream)
-    except NotFoundError:
-        await _js.add_stream(
-            StreamConfig(name=settings.nats_stream, subjects=STREAM_SUBJECTS)
+        await _js.update_stream(desired)
+        logger.info(
+            "updated JetStream stream %s (duplicate_window=%ss)",
+            settings.nats_stream, DUPLICATE_WINDOW_SECONDS,
         )
-        logger.info("created JetStream stream %s", settings.nats_stream)
+    except NotFoundError:
+        await _js.add_stream(desired)
+        logger.info(
+            "created JetStream stream %s (duplicate_window=%ss)",
+            settings.nats_stream, DUPLICATE_WINDOW_SECONDS,
+        )
 
     return _js
 
